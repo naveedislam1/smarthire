@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: smarthire-db
+    environment:
+      POSTGRES_USER: smarthire
+      POSTGRES_PASSWORD: smarthire
+      POSTGRES_DB: smarthire
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smarthire"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Optional: run the API in a container. For local dev you can instead run
+  # `uv run uvicorn app.main:app --reload` on the host against the db above.
+  api:
+    build: .
+    container_name: smarthire-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Inside the compose network the DB host is the service name `db`.
+      DATABASE_URL: postgresql+asyncpg://smarthire:smarthire@db:5432/smarthire
+    ports:
+      - "8000:8000"
+    profiles: ["api"]  # started only with: docker compose --profile api up
+
+volumes:
+  pgdata:
