@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.dependencies import get_current_user, require_role
 from app.candidates.repository import CandidateRepository
 from app.candidates.schemas import (
     CandidateCreate,
@@ -15,10 +16,16 @@ from app.candidates.schemas import (
     CandidateUpdate,
 )
 from app.candidates.service import CandidateService
+from app.common.enums import Role
 from app.common.pagination import Page, PaginationParams
 from app.core.database import get_db
 
-router = APIRouter(prefix="/candidates", tags=["candidates"])
+# Every candidate route requires an authenticated user.
+router = APIRouter(
+    prefix="/candidates",
+    tags=["candidates"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 def get_candidate_service(
@@ -37,7 +44,11 @@ async def register_candidate(
     return await service.register_candidate(payload)
 
 
-@router.get("", response_model=Page[CandidateRead])
+@router.get(
+    "",
+    response_model=Page[CandidateRead],
+    dependencies=[Depends(require_role(Role.RECRUITER))],
+)
 async def list_candidates(
     service: ServiceDep,
     pagination: Annotated[PaginationParams, Depends()],

@@ -1,33 +1,111 @@
 {
   "info": {
     "name": "SmartHire — Week 1 API",
-    "description": "Core job & candidate management endpoints. Import into Postman: File → Import → this file. Set the `baseUrl` collection variable if your server is not on http://localhost:8000. Requests auto-capture jobId / candidateId into collection variables so you can run them in order.",
+    "description": "Core job & candidate management with JWT auth. Import into Postman: File → Import → this file. Run 'Auth → Register recruiter' then 'Auth → Login' first — Login stores the access/refresh tokens into collection variables, and every other request inherits Bearer auth automatically. Set `baseUrl` if not on http://localhost:8000.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "accessToken", "value": "" },
+    { "key": "refreshToken", "value": "" },
     { "key": "jobId", "value": "" },
     { "key": "candidateId", "value": "" }
   ],
   "item": [
     {
-      "name": "Meta",
+      "name": "Auth",
       "item": [
         {
-          "name": "Health",
-          "request": { "method": "GET", "url": "{{baseUrl}}/health" }
+          "name": "Register recruiter",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/auth/register",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"recruiter@example.com\",\n  \"password\": \"password123\",\n  \"full_name\": \"Rita Recruiter\",\n  \"role\": \"recruiter\"\n}" }
+          }
         },
         {
-          "name": "Service info",
-          "request": { "method": "GET", "url": "{{baseUrl}}/" }
+          "name": "Register candidate",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/auth/register",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"password123\",\n  \"full_name\": \"Cara Candidate\",\n  \"role\": \"candidate\"\n}" }
+          }
+        },
+        {
+          "name": "Login (stores tokens)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 ok', () => pm.response.code === 200);",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('accessToken', b.access_token);",
+                  "pm.collectionVariables.set('refreshToken', b.refresh_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "url": "{{baseUrl}}/api/v1/auth/login",
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "username", "value": "recruiter@example.com" },
+                { "key": "password", "value": "password123" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Refresh access token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) pm.collectionVariables.set('accessToken', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/v1/auth/refresh",
+            "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{refreshToken}}\"\n}" }
+          }
+        },
+        {
+          "name": "Me",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/auth/me" }
         }
+      ]
+    },
+    {
+      "name": "Meta",
+      "item": [
+        { "name": "Health", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{baseUrl}}/health" } },
+        { "name": "Service info", "request": { "auth": { "type": "noauth" }, "method": "GET", "url": "{{baseUrl}}/" } }
       ]
     },
     {
       "name": "Jobs",
       "item": [
         {
-          "name": "Create job",
+          "name": "Create job (recruiter)",
           "event": [
             {
               "listen": "test",
@@ -49,20 +127,11 @@
             }
           }
         },
+        { "name": "List jobs", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/jobs?limit=20&offset=0" } },
+        { "name": "List published jobs", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/jobs?status_filter=published" } },
+        { "name": "Get job", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/jobs/{{jobId}}" } },
         {
-          "name": "List jobs",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/jobs?limit=20&offset=0" }
-        },
-        {
-          "name": "List published jobs",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/jobs?status_filter=published" }
-        },
-        {
-          "name": "Get job",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/jobs/{{jobId}}" }
-        },
-        {
-          "name": "Update job",
+          "name": "Update job (recruiter)",
           "request": {
             "method": "PATCH",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -70,21 +139,15 @@
             "body": { "mode": "raw", "raw": "{\n  \"title\": \"Senior Backend Engineer\",\n  \"required_skills\": [\"python\", \"fastapi\", \"kafka\"]\n}" }
           }
         },
-        {
-          "name": "Publish job",
-          "request": { "method": "POST", "url": "{{baseUrl}}/api/v1/jobs/{{jobId}}/publish" }
-        },
-        {
-          "name": "Delete job",
-          "request": { "method": "DELETE", "url": "{{baseUrl}}/api/v1/jobs/{{jobId}}" }
-        }
+        { "name": "Publish job (recruiter)", "request": { "method": "POST", "url": "{{baseUrl}}/api/v1/jobs/{{jobId}}/publish" } },
+        { "name": "Delete job (recruiter)", "request": { "method": "DELETE", "url": "{{baseUrl}}/api/v1/jobs/{{jobId}}" } }
       ]
     },
     {
       "name": "Candidates",
       "item": [
         {
-          "name": "Register candidate",
+          "name": "Register candidate resource",
           "event": [
             {
               "listen": "test",
@@ -103,14 +166,8 @@
             "body": { "mode": "raw", "raw": "{\n  \"email\": \"ada@example.com\",\n  \"full_name\": \"Ada Lovelace\",\n  \"phone\": \"+1-555-0100\"\n}" }
           }
         },
-        {
-          "name": "List candidates",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/candidates?limit=20&offset=0" }
-        },
-        {
-          "name": "Get candidate",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/candidates/{{candidateId}}" }
-        },
+        { "name": "List candidates (recruiter)", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/candidates?limit=20&offset=0" } },
+        { "name": "Get candidate", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/candidates/{{candidateId}}" } },
         {
           "name": "Update candidate",
           "request": {
@@ -129,14 +186,8 @@
             "body": { "mode": "raw", "raw": "{\n  \"headline\": \"Mathematician & first programmer\",\n  \"skills\": [\"mathematics\", \"algorithms\"],\n  \"experience_years\": 10,\n  \"resume_url\": \"https://example.com/resume.pdf\",\n  \"bio\": \"Pioneer of computing.\"\n}" }
           }
         },
-        {
-          "name": "Get candidate profile",
-          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/candidates/{{candidateId}}/profile" }
-        },
-        {
-          "name": "Delete candidate",
-          "request": { "method": "DELETE", "url": "{{baseUrl}}/api/v1/candidates/{{candidateId}}" }
-        }
+        { "name": "Get candidate profile", "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/candidates/{{candidateId}}/profile" } },
+        { "name": "Delete candidate", "request": { "method": "DELETE", "url": "{{baseUrl}}/api/v1/candidates/{{candidateId}}" } }
       ]
     }
   ]

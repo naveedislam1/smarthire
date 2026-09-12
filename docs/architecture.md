@@ -12,6 +12,7 @@ Week 1 delivers the **foundation + core management** slice of Part A:
 - Relational schema for **jobs**, **candidates**, and **candidate profiles**
 - CRUD APIs for jobs and candidates + candidate profile management
 - A **basic job posting flow** (`draft → published`)
+- **JWT authentication + role-based access control** (recruiter / candidate)
 - Local environment (uv, Docker Compose Postgres, Alembic migrations)
 
 Intentionally **deferred** to later milestones (scaffolded but not built):
@@ -81,9 +82,10 @@ elsewhere (so tests can run on in-memory SQLite).
 
 ## 6. Assumptions & tradeoffs
 
-- **No authentication yet.** Not in any Week 1 deliverable. `recruiter_id` is a
-  nullable opaque UUID on `jobs`; real recruiter/candidate accounts and auth
-  arrive later. Tradeoff: endpoints are currently unauthenticated.
+- **Auth is implemented (enhancement).** The assignment brief does not require
+  authentication; we added JWT + RBAC as a best-practice foundation (see §8).
+  `jobs.recruiter_id` is a real FK to `users.id`, set from the authenticated
+  recruiter. Tradeoff: slightly more surface now, but avoids a painful retrofit.
 - **NoSQL DB deferred.** The overall stack lists a NoSQL store, but Week 1's
   data is naturally relational. NoSQL is introduced when analytics/unstructured
   data lands (Week 3+).
@@ -102,3 +104,39 @@ elsewhere (so tests can run on in-memory SQLite).
   for scoring/notifications/analytics; OpenTelemetry wraps the layers.
 - **Weeks 4–5:** job/candidate text is embedded into a vector DB; a LangGraph
   assistant reads the same repositories for retrieval.
+
+## 8. Authentication & authorization
+
+**Scheme:** OAuth2 password flow issuing **JWT** bearer tokens, with
+**role-based access control** (roles: `recruiter`, `candidate`).
+
+**Why dependencies, not middleware.** Auth is enforced through FastAPI
+dependencies defined once in `app/auth/dependencies.py` (`get_current_user`,
+`require_role`). Middleware would run on every request without knowing which
+route needs which role and wouldn't integrate with the OpenAPI security scheme.
+Dependencies are centralised (the JWT logic lives in exactly one place) yet
+per-route granular, and can be attached at router level to protect a whole
+module in one line.
+
+**Flow:**
+
+```
+register → POST /auth/register  (Argon2-hash the password, store user)
+login    → POST /auth/login     (verify password → issue access + refresh JWT)
+call API → Authorization: Bearer <access>  → get_current_user → require_role
+refresh  → POST /auth/refresh   (refresh JWT → new access JWT)
+```
+
+- **Access token** (~15 min) is sent on every request; **refresh token**
+  (~7 days) is used only to mint new access tokens. Tokens are signed with
+  `SECRET_KEY` and carry `sub` (user id), `role`, `type`, `exp`, `jti`.
+- **Stateless verification:** the API validates the signature/expiry without a
+  DB round-trip on the hot path — important for hiring-spike scale.
+- **Password hashing:** Argon2id via `pwdlib`.
+- **Role model:** recruiters manage jobs and view the candidate pool;
+  candidates browse jobs and manage their own data.
+
+**Deliberately deferred (future):** refresh-token revocation via a Redis
+denylist (Redis is already in the stack), token rotation, and rate limiting on
+`/auth/login`. `SECRET_KEY` must be overridden with a strong random value
+outside local development.

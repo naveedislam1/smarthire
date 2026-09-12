@@ -17,11 +17,14 @@ class JobBase(BaseModel):
     employment_type: EmploymentType = EmploymentType.FULL_TIME
     required_skills: list[str] = Field(default_factory=list)
     hiring_stages: list[str] = Field(default_factory=list)
-    recruiter_id: uuid.UUID | None = None
 
 
 class JobCreate(JobBase):
-    """Payload to create a new job (created in DRAFT state)."""
+    """Payload to create a new job (created in DRAFT state).
+
+    ``recruiter_id`` is not accepted here — it is taken from the authenticated
+    recruiter so a caller cannot post jobs on someone else's behalf.
+    """
 
 
 class JobUpdate(BaseModel):
@@ -42,5 +45,6 @@ class JobRead(JobBase):
 
     id: uuid.UUID
     status: JobStatus
+    recruiter_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime

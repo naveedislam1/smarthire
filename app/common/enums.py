@@ -17,6 +17,13 @@ class JobStatus(StrEnum):
     READY = "ready"
 
 
+class Role(StrEnum):
+    """Access-control roles for authenticated users."""
+
+    RECRUITER = "recruiter"
+    CANDIDATE = "candidate"
+
+
 class EmploymentType(StrEnum):
     """Type of employment offered by a job."""
 

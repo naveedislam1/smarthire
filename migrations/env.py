@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.pool import NullPool
 
 # Import model modules so their tables register on Base.metadata for autogenerate.
+import app.auth.models  # noqa: F401
 import app.candidates.models  # noqa: F401
 import app.jobs.models  # noqa: F401
 from app.core.config import settings

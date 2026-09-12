@@ -33,6 +33,16 @@ class Settings(BaseSettings):
         description="Async SQLAlchemy database URL (postgresql+asyncpg://...).",
     )
 
+    # --- Auth / JWT ---
+    # NOTE: override secret_key via the environment in any non-local deployment.
+    secret_key: str = Field(
+        default="dev-insecure-secret-change-me-in-production-0123456789",
+        description="Signing key for JWTs. MUST be overridden outside local dev.",
+    )
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 7
+
     # --- Logging ---
     log_level: str = "INFO"
 

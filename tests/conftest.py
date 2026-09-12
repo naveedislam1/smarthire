@@ -13,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Import model modules so their tables register on Base.metadata.
+import app.auth.models  # noqa: F401
 import app.candidates.models  # noqa: F401
 import app.jobs.models  # noqa: F401
 from app.core.database import Base, get_db
@@ -50,6 +51,36 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
         yield ac
 
     app.dependency_overrides.clear()
+
+
+async def _auth_headers(client: AsyncClient, email: str, role: str) -> dict[str, str]:
+    """Register a user with the given role and return a Bearer auth header."""
+    resp = await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": email,
+            "password": "password123",
+            "full_name": email.split("@")[0].title(),
+            "role": role,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    token_resp = await client.post(
+        "/api/v1/auth/login",
+        data={"username": email, "password": "password123"},
+    )
+    assert token_resp.status_code == 200, token_resp.text
+    return {"Authorization": f"Bearer {token_resp.json()['access_token']}"}
+
+
+@pytest_asyncio.fixture
+async def recruiter_headers(client: AsyncClient) -> dict[str, str]:
+    return await _auth_headers(client, "recruiter@example.com", "recruiter")
+
+
+@pytest_asyncio.fixture
+async def candidate_headers(client: AsyncClient) -> dict[str, str]:
+    return await _auth_headers(client, "user@example.com", "candidate")
 
 
 @pytest.fixture

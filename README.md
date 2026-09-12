@@ -79,24 +79,36 @@ uv run ruff check .
 
 ## API overview
 
-All endpoints are under `/api/v1`. Interactive docs at `/docs`.
+All endpoints are under `/api/v1`. Interactive docs at `/docs` (use the
+**Authorize** button with a token from `/auth/login`).
 
-| Method | Path | Description |
-| --- | --- | --- |
-| POST | `/jobs` | Create a job (starts in `draft`) |
-| GET | `/jobs` | List jobs (pagination, `status_filter`) |
-| GET | `/jobs/{id}` | Retrieve a job |
-| PATCH | `/jobs/{id}` | Update job fields |
-| POST | `/jobs/{id}/publish` | Publish: `draft` → `published` |
-| DELETE | `/jobs/{id}` | Delete a job |
-| POST | `/candidates` | Register a candidate |
-| GET | `/candidates` | List candidates (pagination) |
-| GET | `/candidates/{id}` | Retrieve a candidate (+ profile) |
-| PATCH | `/candidates/{id}` | Update a candidate |
-| DELETE | `/candidates/{id}` | Delete a candidate |
-| PUT | `/candidates/{id}/profile` | Create/update profile |
-| GET | `/candidates/{id}/profile` | Retrieve profile |
-| GET | `/health` | Liveness check |
+### Authentication
+
+JWT bearer auth (OAuth2 password flow) with two roles: **recruiter** and
+**candidate**. Log in to get an access + refresh token, then send
+`Authorization: Bearer <access_token>` on every request. See
+[docs/architecture.md](docs/architecture.md#8-authentication--authorization).
+
+| Method | Path | Description | Access |
+| --- | --- | --- | --- |
+| POST | `/auth/register` | Create an account (`role`: recruiter/candidate) | Public |
+| POST | `/auth/login` | Get access + refresh tokens (form: `username`,`password`) | Public |
+| POST | `/auth/refresh` | Exchange a refresh token for a new access token | Public |
+| GET | `/auth/me` | Current user | Authenticated |
+| POST | `/jobs` | Create a job (starts in `draft`) | Recruiter |
+| GET | `/jobs` | List jobs (pagination, `status_filter`) | Authenticated |
+| GET | `/jobs/{id}` | Retrieve a job | Authenticated |
+| PATCH | `/jobs/{id}` | Update job fields | Recruiter |
+| POST | `/jobs/{id}/publish` | Publish: `draft` → `published` | Recruiter |
+| DELETE | `/jobs/{id}` | Delete a job | Recruiter |
+| POST | `/candidates` | Register a candidate | Authenticated |
+| GET | `/candidates` | List candidates (pagination) | Recruiter |
+| GET | `/candidates/{id}` | Retrieve a candidate (+ profile) | Authenticated |
+| PATCH | `/candidates/{id}` | Update a candidate | Authenticated |
+| DELETE | `/candidates/{id}` | Delete a candidate | Authenticated |
+| PUT | `/candidates/{id}/profile` | Create/update profile | Authenticated |
+| GET | `/candidates/{id}/profile` | Retrieve profile | Authenticated |
+| GET | `/health` | Liveness check | Public |
 
 ## Tech stack
 
@@ -108,6 +120,7 @@ All endpoints are under `/api/v1`. Interactive docs at `/docs`.
 | Database | PostgreSQL 16 (asyncpg driver) |
 | Migrations | Alembic (async) |
 | Validation | Pydantic v2 |
+| Auth | OAuth2 password flow, JWT (PyJWT), Argon2 (pwdlib), RBAC |
 | Tooling | uv, ruff, mypy, pytest |
 | Local infra | Docker Compose |
 

@@ -19,7 +19,9 @@ class JobService:
     def __init__(self, repository: JobRepository) -> None:
         self.repository = repository
 
-    async def create_job(self, payload: JobCreate) -> JobRead:
+    async def create_job(
+        self, payload: JobCreate, *, recruiter_id: uuid.UUID
+    ) -> JobRead:
         job = Job(
             title=payload.title,
             description=payload.description,
@@ -27,7 +29,7 @@ class JobService:
             employment_type=payload.employment_type,
             required_skills=payload.required_skills,
             hiring_stages=payload.hiring_stages,
-            recruiter_id=payload.recruiter_id,
+            recruiter_id=recruiter_id,
             status=JobStatus.DRAFT,
         )
         job = await self.repository.create(job)

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.auth.router import router as auth_router
 from app.candidates.router import router as candidates_router
 from app.core.config import settings
 from app.core.database import engine
@@ -39,6 +40,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # Domain routers, all under the versioned API prefix.
+    app.include_router(auth_router, prefix=settings.api_v1_prefix)
     app.include_router(jobs_router, prefix=settings.api_v1_prefix)
     app.include_router(candidates_router, prefix=settings.api_v1_prefix)
 

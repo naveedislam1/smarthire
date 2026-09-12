@@ -10,13 +10,14 @@ Read [architecture.md](architecture.md) first for the big picture.
 2. [Config & tooling](#2-config--tooling)
 3. [Core (`app/core`)](#3-core-appcore)
 4. [Common (`app/common`)](#4-common-appcommon)
-5. [Jobs module (`app/jobs`)](#5-jobs-module-appjobs)
-6. [Candidates module (`app/candidates`)](#6-candidates-module-appcandidates)
-7. [App wiring (`app/main.py`)](#7-app-wiring-appmainpy)
-8. [Migrations (`migrations/`)](#8-migrations-migrations)
-9. [Tests (`tests/`)](#9-tests-tests)
-10. [Data model reference](#10-data-model-reference)
-11. [API reference](#11-api-reference)
+5. [Auth module (`app/auth`)](#5-auth-module-appauth)
+6. [Jobs module (`app/jobs`)](#6-jobs-module-appjobs)
+7. [Candidates module (`app/candidates`)](#7-candidates-module-appcandidates)
+8. [App wiring (`app/main.py`)](#8-app-wiring-appmainpy)
+9. [Migrations (`migrations/`)](#9-migrations-migrations)
+10. [Tests (`tests/`)](#10-tests-tests)
+11. [Data model reference](#11-data-model-reference)
+12. [API reference](#12-api-reference)
 
 ---
 
@@ -133,14 +134,63 @@ list responses across all list endpoints.
 
 ---
 
-## 5. Jobs module (`app/jobs`)
+## 5. Auth module (`app/auth`)
+
+Centralised authentication + role-based access control. Same layered shape as
+the other domains, plus a shared `dependencies.py` every module reuses.
+
+### `models.py`
+`User` ORM model (`users` table): unique-indexed `email`, `hashed_password`
+(Argon2), `full_name`, `role` (indexed enum: `recruiter`/`candidate`),
+`is_active`. *Why:* the identity every token maps back to.
+
+### `schemas.py`
+`RegisterRequest` (email, password ≥8, full_name, role), `UserRead` (never
+exposes the hash), `TokenResponse` (access + refresh + `token_type`),
+`RefreshRequest`. *Why:* auth API contracts.
+
+### `security.py`
+The single place that knows crypto: `hash_password`/`verify_password` (Argon2id
+via `pwdlib`) and `create_access_token`/`create_refresh_token`/`decode_token`
+(JWT via PyJWT). Tokens carry `sub`, `role`, `type` (access vs refresh), `exp`,
+`jti`. *Why:* isolate hashing + signing so nothing else touches raw crypto.
+
+### `repository.py`
+`UserRepository` — `create`, `get`, `get_by_email`. *Why:* user data access.
+
+### `service.py`
+`AuthService` — `register` (409 on duplicate email), `login` (verify password →
+issue tokens; generic error to avoid leaking which emails exist),
+`refresh` (validate a *refresh* token → new tokens). Defines `AuthError` (401).
+*Why:* the auth business rules.
+
+### `dependencies.py` — the centralised guard
+`get_current_user` (decode the Bearer access token → load the active user),
+the `CurrentUser` type alias, and `require_role(*roles)` (a dependency factory
+returning 403 `ForbiddenError` when the role doesn't match). `oauth2_scheme`
+powers the Swagger **Authorize** button. *Why:* one definition of "who are you"
+and "are you allowed", reused by every router — no JWT logic duplicated.
+
+### `router.py`
+`/auth/register`, `/auth/login` (OAuth2 form: `username`+`password`),
+`/auth/refresh`, `/auth/me`. *Why:* the auth HTTP surface.
+
+**How other modules use it:** `app/jobs/router.py` attaches
+`Depends(get_current_user)` at router level (all job routes need a login) and
+`Depends(require_role(Role.RECRUITER))` on writes; `create_job` reads the
+recruiter id from the authenticated user. `app/candidates/router.py` requires
+authentication for all routes and `require_role(Role.RECRUITER)` to list the
+candidate pool.
+
+## 6. Jobs module (`app/jobs`)
 
 ### `models.py`
 `Job` ORM model (`jobs` table): `title`, `description`, `location`,
 `employment_type`, `required_skills`/`hiring_stages` (JSON list — `JSONB` on
 Postgres via `JSONList = JSON().with_variant(JSONB(), "postgresql")`),
-`status` (indexed enum, defaults to `DRAFT`), and nullable `recruiter_id`.
-Inherits `UUIDMixin`/`TimestampMixin`. *Why:* the durable shape of a job posting.
+`status` (indexed enum, defaults to `DRAFT`), and `recruiter_id` (nullable FK
+to `users.id`, `ondelete=SET NULL`). Inherits `UUIDMixin`/`TimestampMixin`.
+*Why:* the durable shape of a job posting, owned by its recruiter.
 
 ### `schemas.py`
 Pydantic models: `JobCreate` (create payload), `JobUpdate` (all-optional partial
@@ -162,12 +212,15 @@ all job SQL in one place.
 
 ### `router.py`
 Declares the `/jobs` routes and the `get_job_service` dependency that wires
-`JobRepository(db) → JobService`. Maps HTTP verbs to service methods and sets
-status codes (201 create, 204 delete). *Why:* the HTTP surface for jobs.
+`JobRepository(db) → JobService`. Requires login at router level
+(`Depends(get_current_user)`); writes (create/update/publish/delete) add
+`require_role(Role.RECRUITER)`, and `create_job` passes the authenticated
+recruiter's id to the service. Sets status codes (201 create, 204 delete).
+*Why:* the HTTP surface for jobs, with access control declared here.
 
 ---
 
-## 6. Candidates module (`app/candidates`)
+## 7. Candidates module (`app/candidates`)
 
 ### `models.py`
 `Candidate` (`candidates`): unique-indexed `email`, `full_name`, `phone`, and a
@@ -197,15 +250,17 @@ uniqueness rule surfaced as a clean 409 rather than a DB IntegrityError.
 
 ### `router.py`
 Declares the `/candidates` routes (including `/{id}/profile` GET + PUT) and the
-`get_candidate_service` dependency. *Why:* the HTTP surface for candidates.
+`get_candidate_service` dependency. Requires login at router level; listing the
+candidate pool adds `require_role(Role.RECRUITER)`. *Why:* the HTTP surface for
+candidates, with access control declared here.
 
 ---
 
-## 7. App wiring (`app/main.py`)
+## 8. App wiring (`app/main.py`)
 
 - `lifespan` — configures logging on startup, disposes the engine on shutdown.
 - `create_app()` — the application factory: builds `FastAPI`, registers the
-  exception handlers, includes the jobs and candidates routers under
+  exception handlers, includes the auth, jobs, and candidates routers under
   `settings.api_v1_prefix`, and defines `/` (service metadata) and `/health`.
 - `app = create_app()` — the ASGI entry point uvicorn runs.
 
@@ -214,10 +269,11 @@ dependencies, and keeps wiring in one readable place.
 
 ---
 
-## 8. Migrations (`migrations/`)
+## 9. Migrations (`migrations/`)
 
 ### `env.py`
-Async Alembic environment. Imports the model modules so their tables register on
+Async Alembic environment. Imports the model modules (auth, candidates, jobs) so
+their tables register on
 `Base.metadata`, injects `settings.database_url` into Alembic config, and runs
 migrations through the async engine (`run_migrations_online`) or offline. *Why:*
 `--autogenerate` and `upgrade` work against the same async DB the app uses.
@@ -226,35 +282,53 @@ migrations through the async engine (`run_migrations_online`) or offline. *Why:*
 Template for generated revision files (modern typing syntax). *Why:* consistent,
 lint-clean migration scaffolding.
 
-### `versions/*_init_jobs_and_candidates.py`
-The autogenerated initial migration creating `jobs`, `candidates`,
+### `versions/*_init_users_jobs_candidates.py`
+The autogenerated initial migration creating `users`, `jobs`, `candidates`,
 `candidate_profiles`, their enum types, and indexes. *Why:* the versioned,
 reproducible schema baseline.
 
 ---
 
-## 9. Tests (`tests/`)
+## 10. Tests (`tests/`)
 
 ### `conftest.py`
 Fixtures: `db_session` builds a fresh in-memory SQLite schema per test via
 `Base.metadata.create_all`; `client` builds the app with `get_db` overridden to
-that session and returns an httpx `AsyncClient` over the ASGI app. *Why:* fast,
-isolated, service-free tests that still exercise the real routers/services/ORM
-(portable JSON columns make the same models work on SQLite).
+that session and returns an httpx `AsyncClient` over the ASGI app. `recruiter_headers`
+and `candidate_headers` register a user of that role and return a Bearer auth
+header. *Why:* fast, isolated, service-free tests that still exercise the real
+routers/services/ORM + auth (portable JSON columns make the models work on SQLite).
+
+### `auth/test_auth_api.py`
+Covers register → login → `/me`, 409 duplicate registration, 401 wrong password,
+refresh returning a new access token, and rejecting an access token at the
+refresh endpoint. *Why:* locks the auth flows.
 
 ### `jobs/test_jobs_api.py`
-Covers create-as-draft, get/list, update, the publish flow (including the 422 on
-re-publish and status filtering), delete, and 404. *Why:* locks the job
-lifecycle and error paths.
+Covers create-as-draft (recruiter, with derived `recruiter_id`), get/list, the
+publish flow (422 on re-publish), delete, 404, plus authz: 401 unauthenticated
+and 403 when a candidate tries to create. *Why:* locks the job lifecycle + access.
 
 ### `candidates/test_candidates_api.py`
 Covers register, 409 duplicate email, profile upsert + get (including 404 before
-a profile exists and idempotent re-upsert), update, delete, and 404. *Why:*
-locks candidate + profile behaviour.
+a profile exists), update, delete, 404, plus authz: 401 unauthenticated and 403
+when a candidate tries to list the pool. *Why:* locks candidate behaviour + access.
 
 ---
 
-## 10. Data model reference
+## 11. Data model reference
+
+**`users`**
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | UUID | PK |
+| `email` | varchar(320) | unique, indexed |
+| `hashed_password` | varchar(255) | Argon2 hash |
+| `full_name` | varchar(255) | required |
+| `role` | enum | `recruiter`/`candidate`, indexed |
+| `is_active` | bool | default true |
+| `created_at`/`updated_at` | timestamptz | server-managed |
 
 **`jobs`**
 
@@ -268,7 +342,7 @@ locks candidate + profile behaviour.
 | `required_skills` | JSONB/JSON | list of strings |
 | `hiring_stages` | JSONB/JSON | ordered list of stage names |
 | `status` | enum | `draft`→`published`(→`processing`→`ready`), indexed |
-| `recruiter_id` | UUID | nullable (no auth yet) |
+| `recruiter_id` | UUID | nullable FK → `users.id` (SET NULL), indexed |
 | `created_at`/`updated_at` | timestamptz | server-managed |
 
 **`candidates`**
@@ -296,24 +370,29 @@ locks candidate + profile behaviour.
 
 ---
 
-## 11. API reference
+## 12. API reference
 
-Base prefix: `/api/v1`.
+Base prefix: `/api/v1`. Access column: **Public** (no token), **Auth** (any
+logged-in user), **Recruiter** (recruiter role required).
 
-| Method | Path | Body | Success | Errors | Rule |
+| Method | Path | Body | Success | Errors | Access |
 | --- | --- | --- | --- | --- | --- |
-| POST | `/jobs` | `JobCreate` | 201 `JobRead` | 422 | Created as `draft` |
-| GET | `/jobs` | — | 200 `Page[JobRead]` | — | `limit`/`offset`/`status_filter` |
-| GET | `/jobs/{id}` | — | 200 `JobRead` | 404 | — |
-| PATCH | `/jobs/{id}` | `JobUpdate` | 200 `JobRead` | 404, 422 | Partial update |
-| POST | `/jobs/{id}/publish` | — | 200 `JobRead` | 404, 422 | Only `draft` may publish |
-| DELETE | `/jobs/{id}` | — | 204 | 404 | — |
-| POST | `/candidates` | `CandidateCreate` | 201 `CandidateRead` | 409, 422 | Unique email |
-| GET | `/candidates` | — | 200 `Page[CandidateRead]` | — | `limit`/`offset` |
-| GET | `/candidates/{id}` | — | 200 `CandidateRead` | 404 | Includes profile |
-| PATCH | `/candidates/{id}` | `CandidateUpdate` | 200 `CandidateRead` | 404 | Partial update |
-| DELETE | `/candidates/{id}` | — | 204 | 404 | Cascades to profile |
-| PUT | `/candidates/{id}/profile` | `CandidateProfileUpsert` | 200 `CandidateProfileRead` | 404 | Create or update |
-| GET | `/candidates/{id}/profile` | — | 200 `CandidateProfileRead` | 404 | 404 if no profile |
-| GET | `/health` | — | 200 | — | Liveness |
-| GET | `/` | — | 200 | — | Service metadata |
+| POST | `/auth/register` | `RegisterRequest` | 201 `UserRead` | 409, 422 | Public |
+| POST | `/auth/login` | form `username`,`password` | 200 `TokenResponse` | 401 | Public |
+| POST | `/auth/refresh` | `RefreshRequest` | 200 `TokenResponse` | 401 | Public |
+| GET | `/auth/me` | — | 200 `UserRead` | 401 | Auth |
+| POST | `/jobs` | `JobCreate` | 201 `JobRead` | 401, 403, 422 | Recruiter |
+| GET | `/jobs` | — | 200 `Page[JobRead]` | 401 | Auth |
+| GET | `/jobs/{id}` | — | 200 `JobRead` | 401, 404 | Auth |
+| PATCH | `/jobs/{id}` | `JobUpdate` | 200 `JobRead` | 401, 403, 404 | Recruiter |
+| POST | `/jobs/{id}/publish` | — | 200 `JobRead` | 401, 403, 404, 422 | Recruiter |
+| DELETE | `/jobs/{id}` | — | 204 | 401, 403, 404 | Recruiter |
+| POST | `/candidates` | `CandidateCreate` | 201 `CandidateRead` | 401, 409, 422 | Auth |
+| GET | `/candidates` | — | 200 `Page[CandidateRead]` | 401, 403 | Recruiter |
+| GET | `/candidates/{id}` | — | 200 `CandidateRead` | 401, 404 | Auth |
+| PATCH | `/candidates/{id}` | `CandidateUpdate` | 200 `CandidateRead` | 401, 404 | Auth |
+| DELETE | `/candidates/{id}` | — | 204 | 401, 404 | Auth |
+| PUT | `/candidates/{id}/profile` | `CandidateProfileUpsert` | 200 `CandidateProfileRead` | 401, 404 | Auth |
+| GET | `/candidates/{id}/profile` | — | 200 `CandidateProfileRead` | 401, 404 | Auth |
+| GET | `/health` | — | 200 | — | Public |
+| GET | `/` | — | 200 | — | Public |

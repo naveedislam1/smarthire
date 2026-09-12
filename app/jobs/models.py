@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import JSON, String
+from sqlalchemy import JSON, ForeignKey, String
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -50,6 +50,8 @@ class Job(UUIDMixin, TimestampMixin, Base):
         index=True,
     )
 
-    # No auth in Week 1: recruiter is modelled as an opaque UUID (nullable),
-    # to be linked to real recruiter accounts once auth is introduced.
-    recruiter_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    # Set from the authenticated recruiter that created the job. Nullable so
+    # existing/seed rows without an owner remain valid.
+    recruiter_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
