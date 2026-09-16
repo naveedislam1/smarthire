@@ -1,35 +1,143 @@
+# SmartHire microservices — full Week 1–2 split. From repo root:
+#   ./scripts/generate-keys.sh
+#   docker compose up --build
+#
+# Each service owns its own database; Kafka carries domain events; Temporal runs
+# the job publishing workflow. The gateway is the single entry point (:8080).
 services:
-  db:
+  # --- Databases (one per service) ---
+  auth-db:
     image: postgres:16-alpine
-    container_name: smarthire-db
-    environment:
-      POSTGRES_USER: smarthire
-      POSTGRES_PASSWORD: smarthire
-      POSTGRES_DB: smarthire
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U smarthire"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    environment: {POSTGRES_USER: smarthire, POSTGRES_PASSWORD: smarthire, POSTGRES_DB: auth}
+    ports: ["5433:5432"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U smarthire"], interval: 5s, timeout: 5s, retries: 5}
 
-  # Optional: run the API in a container. For local dev you can instead run
-  # `uv run uvicorn app.main:app --reload` on the host against the db above.
-  api:
-    build: .
-    container_name: smarthire-api
+  candidates-db:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: smarthire, POSTGRES_PASSWORD: smarthire, POSTGRES_DB: candidates}
+    ports: ["5434:5432"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U smarthire"], interval: 5s, timeout: 5s, retries: 5}
+
+  jobs-db:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: smarthire, POSTGRES_PASSWORD: smarthire, POSTGRES_DB: jobs}
+    ports: ["5435:5432"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U smarthire"], interval: 5s, timeout: 5s, retries: 5}
+
+  applications-db:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: smarthire, POSTGRES_PASSWORD: smarthire, POSTGRES_DB: applications}
+    ports: ["5436:5432"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U smarthire"], interval: 5s, timeout: 5s, retries: 5}
+
+  # --- Infra ---
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+    ports: ["9092:9092", "9094:9094"]
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
     depends_on:
-      db:
-        condition: service_healthy
+      jobs-db: {condition: service_healthy}
     environment:
-      # Inside the compose network the DB host is the service name `db`.
-      DATABASE_URL: postgresql+asyncpg://smarthire:smarthire@db:5432/smarthire
-    ports:
-      - "8000:8000"
-    profiles: ["api"]  # started only with: docker compose --profile api up
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: smarthire
+      POSTGRES_PWD: smarthire
+      POSTGRES_SEEDS: jobs-db
+    ports: ["7233:7233"]
 
-volumes:
-  pgdata:
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on: [temporal]
+    environment: {TEMPORAL_ADDRESS: temporal:7233}
+    ports: ["8088:8080"]
+
+  # --- Services ---
+  auth:
+    build: {context: ., dockerfile: services/auth/Dockerfile}
+    depends_on:
+      auth-db: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://smarthire:smarthire@auth-db:5432/auth
+      JWT_PRIVATE_KEY_PATH: /keys/jwt_private.pem
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
+    volumes: ["./keys:/keys:ro"]
+    ports: ["8001:8001"]
+    restart: unless-stopped
+
+  candidates:
+    build: {context: ., dockerfile: services/candidates/Dockerfile}
+    depends_on:
+      candidates-db: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://smarthire:smarthire@candidates-db:5432/candidates
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes: ["./keys:/keys:ro"]
+    ports: ["8002:8002"]
+    restart: unless-stopped
+
+  jobs:
+    build: {context: ., dockerfile: services/jobs/Dockerfile}
+    depends_on:
+      jobs-db: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://smarthire:smarthire@jobs-db:5432/jobs
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TEMPORAL_HOST: temporal:7233
+    volumes: ["./keys:/keys:ro"]
+    ports: ["8003:8003"]
+    restart: unless-stopped
+
+  jobs-worker:
+    build: {context: ., dockerfile: services/jobs/Dockerfile}
+    command: ["uv", "run", "--no-sync", "--package", "smarthire-jobs", "python", "-m", "app.worker"]
+    depends_on: [jobs, temporal]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://smarthire:smarthire@jobs-db:5432/jobs
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TEMPORAL_HOST: temporal:7233
+    restart: unless-stopped
+
+  applications:
+    build: {context: ., dockerfile: services/applications/Dockerfile}
+    depends_on:
+      applications-db: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://smarthire:smarthire@applications-db:5432/applications
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes: ["./keys:/keys:ro"]
+    ports: ["8004:8004"]
+    restart: unless-stopped
+
+  gateway:
+    build: {context: ., dockerfile: services/gateway/Dockerfile}
+    depends_on: [auth, candidates, jobs, applications, redis]
+    environment:
+      AUTH_SERVICE_URL: http://auth:8001
+      CANDIDATES_SERVICE_URL: http://candidates:8002
+      JOBS_SERVICE_URL: http://jobs:8003
+      APPLICATIONS_SERVICE_URL: http://applications:8004
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8080:8080"]
+    restart: unless-stopped

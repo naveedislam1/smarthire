@@ -1,139 +1,83 @@
 # SmartHire — Intelligent Workforce Orchestration & Recruitment Platform
 
-Backend for **SmartHire**, TalentSphere Inc.'s recruitment automation platform.
-This repository is built incrementally over 5 weekly milestones.
+Backend for **SmartHire**, TalentSphere Inc.'s recruitment automation platform —
+built as **fault-isolated microservices** in a monorepo (uv workspace).
 
-> **Status: Week 1 — Foundation + Core Management.**
-> Job & candidate management (CRUD), candidate profiles, and a basic job
-> posting flow, on a clean domain-modular FastAPI + async PostgreSQL foundation.
+> **Status:** Week 1–2 delivered and split into independent services.
+> Job & candidate management, JWT auth (RBAC), the candidate application
+> workflow, and a **Temporal**-orchestrated job publishing pipeline — each
+> running as its own deployable service with its own database, communicating over
+> **Kafka**. If one service goes down, the others keep working.
 
----
+Deep dives: [docs/microservices.md](docs/microservices.md) ·
+[docs/architecture.md](docs/architecture.md) ·
+[docs/week-2-implementation.md](docs/week-2-implementation.md)
 
-## Project overview
+## Services
 
-SmartHire solves manual, slow, and inconsistent hiring workflows with a
-scalable, event-driven backend. Week 1 lays the foundation: a well-structured
-service, a relational schema for jobs and candidates, and the core management
-APIs — everything later milestones (Temporal workflows, Kafka events, GenAI
-assistant) build on.
-
-## Architecture
-
-Domain-modular layout. Each domain (`jobs`, `candidates`) owns its own
-router → service → repository → model, so HTTP, business rules, and persistence
-stay cleanly separated.
-
-```
-              HTTP request
-                   │
-        ┌──────────▼──────────┐
-        │   router (FastAPI)  │  validation, status codes
-        └──────────┬──────────┘
-        ┌──────────▼──────────┐
-        │      service        │  business rules, state transitions
-        └──────────┬──────────┘
-        ┌──────────▼──────────┐
-        │     repository      │  async SQLAlchemy data access
-        └──────────┬──────────┘
-        ┌──────────▼──────────┐
-        │  PostgreSQL (async) │
-        └─────────────────────┘
-```
-
-See [docs/architecture.md](docs/architecture.md) for design decisions and
-[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) for a file-by-file walkthrough.
-
-## Setup instructions
-
-Prerequisites: [uv](https://docs.astral.sh/uv/), Docker (for Postgres).
-
-```bash
-# 1. Install dependencies
-uv sync
-
-# 2. Start PostgreSQL
-docker compose up -d db
-
-# 3. Configure environment
-cp .env.example .env
-
-# 4. Apply the database schema
-uv run alembic upgrade head
-
-# 5. Run the API (http://localhost:8000, docs at /docs)
-uv run uvicorn app.main:app --reload
-```
-
-Run the whole stack (API + DB) in containers instead:
-
-```bash
-docker compose --profile api up --build
-```
-
-Run the tests (no external services needed — uses in-memory SQLite):
-
-```bash
-uv run pytest
-uv run ruff check .
-```
-
-## API overview
-
-All endpoints are under `/api/v1`. Interactive docs at `/docs` (use the
-**Authorize** button with a token from `/auth/login`).
-
-### Authentication
-
-JWT bearer auth (OAuth2 password flow) with two roles: **recruiter** and
-**candidate**. Log in to get an access + refresh token, then send
-`Authorization: Bearer <access_token>` on every request. See
-[docs/architecture.md](docs/architecture.md#8-authentication--authorization).
-
-| Method | Path | Description | Access |
+| Service | Port | Database | Role |
 | --- | --- | --- | --- |
-| POST | `/auth/register` | Create an account (`role`: recruiter/candidate) | Public |
-| POST | `/auth/login` | Get access + refresh tokens (form: `username`,`password`) | Public |
-| POST | `/auth/refresh` | Exchange a refresh token for a new access token | Public |
-| GET | `/auth/me` | Current user | Authenticated |
-| POST | `/jobs` | Create a job (starts in `draft`) | Recruiter |
-| GET | `/jobs` | List jobs (pagination, `status_filter`) | Authenticated |
-| GET | `/jobs/{id}` | Retrieve a job | Authenticated |
-| PATCH | `/jobs/{id}` | Update job fields | Recruiter |
-| POST | `/jobs/{id}/publish` | Publish: `draft` → `published` | Recruiter |
-| DELETE | `/jobs/{id}` | Delete a job | Recruiter |
-| POST | `/candidates` | Register a candidate | Authenticated |
-| GET | `/candidates` | List candidates (pagination) | Recruiter |
-| GET | `/candidates/{id}` | Retrieve a candidate (+ profile) | Authenticated |
-| PATCH | `/candidates/{id}` | Update a candidate | Authenticated |
-| DELETE | `/candidates/{id}` | Delete a candidate | Authenticated |
-| PUT | `/candidates/{id}/profile` | Create/update profile | Authenticated |
-| GET | `/candidates/{id}/profile` | Retrieve profile | Authenticated |
-| GET | `/health` | Liveness check | Public |
+| **gateway** | 8080 | — | Single entry point: routing, JWT-aware proxy, per-upstream circuit breakers, Redis rate limiting |
+| **auth** | 8001 | auth | Users; issues RS256 JWTs (access + refresh) |
+| **candidates** | 8002 | candidates | Candidate + profile management; emits `candidate.*` events |
+| **jobs** (+ Temporal worker) | 8003 | jobs | Job management + publishing workflow (`processing → ready`); emits `job.*` events |
+| **applications** | 8004 | applications | Apply workflow (duplicate/eligibility/limit/idempotency, stage tracking); keeps local read-models from `job.*`/`candidate.*`; emits `application.*` |
+
+Shared code (config, async DB, RS256 security, Kafka events, errors) lives in
+`libs/smarthire_common`.
+
+## How fault isolation works
+
+- **Database per service** — no shared DB failure domain.
+- **Stateless RS256 JWT** — auth signs; every service verifies with the public
+  key, so auth downtime doesn't block authenticated requests.
+- **Event-driven read-models** — the applications service checks apply-time
+  eligibility against its *own* copies of job/candidate state (fed by Kafka), so
+  it keeps accepting applications even when Jobs or Candidates is down.
+- **Gateway circuit breakers** — a failing upstream trips only its own breaker
+  (fast 503 on those routes); the gateway and other routes stay healthy.
 
 ## Tech stack
 
-| Concern | Choice |
-| --- | --- |
-| Language | Python 3.12 |
-| Web framework | FastAPI |
-| ORM | SQLAlchemy 2.0 (async) |
-| Database | PostgreSQL 16 (asyncpg driver) |
-| Migrations | Alembic (async) |
-| Validation | Pydantic v2 |
-| Auth | OAuth2 password flow, JWT (PyJWT), Argon2 (pwdlib), RBAC |
-| Tooling | uv, ruff, mypy, pytest |
-| Local infra | Docker Compose |
+Python 3.12 · FastAPI · SQLAlchemy 2 (async) · PostgreSQL · Alembic · Pydantic v2
+· **Temporal** (job publishing) · **Kafka** (domain events) · Redis (rate limit)
+· PyJWT (RS256) + Argon2 (pwdlib) · Docker Compose · uv · ruff · pytest.
 
-Later milestones add Temporal, Kafka + Schema Registry, Celery + RabbitMQ,
-Redis, Prometheus/Grafana/Jaeger/OpenTelemetry, and the GenAI layer
-(LangGraph + vector DB).
+## Run locally
+
+Prerequisites: [uv](https://docs.astral.sh/uv/), Docker.
+
+```bash
+# 1. Generate the dev RS256 keypair (writes keys/, gitignored)
+./scripts/generate-keys.sh
+
+# 2. Bring up everything: per-service DBs + Redis + Kafka + Temporal + services
+docker compose up --build
+#    Gateway → http://localhost:8080    Temporal UI → http://localhost:8088
+```
+
+Run services from source instead (faster iteration): start infra with
+`docker compose up -d auth-db candidates-db jobs-db applications-db redis kafka temporal`,
+apply each service's migrations (`cd services/<svc> && uv run alembic upgrade head`),
+then run each with `uv run uvicorn app.main:app --port <port>` (and the jobs
+worker with `uv run python -m app.worker`). See
+[docs/microservices.md](docs/microservices.md) for the exact commands.
+
+## Tests
+
+```bash
+uv sync --all-packages
+uv run ruff check libs services
+cd services/auth         && uv run pytest   # and candidates / jobs / applications / gateway
+```
 
 ## Roadmap
 
-| Week | Focus |
-| --- | --- |
-| **1 (this)** | Foundation + core job/candidate management |
-| 2 | Application workflow + Temporal publishing pipeline |
-| 3 | Kafka events, background workers, observability |
-| 4 | Embeddings + semantic search (GenAI) |
-| 5 | AI recruiter/candidate assistant |
+| Week | Focus | Status |
+| --- | --- | --- |
+| 1 | Foundation + job/candidate management | ✅ (now a service) |
+| 2 | Application workflow + Temporal publishing | ✅ (now services) |
+| — | Microservices decomposition (fault isolation) | ✅ |
+| 3 | Kafka events, background workers, observability | events ✅; workers/observability next |
+| 4 | Embeddings + semantic search (GenAI) | planned (`search` service) |
+| 5 | AI assistant + recommendations | planned (`ai-assistant` service) |
