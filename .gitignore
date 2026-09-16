@@ -11,6 +11,7 @@ venv/
 # Env & secrets
 .env
 .env.local
+keys/*.pem
 
 # OS / editors
 .DS_Store
