@@ -46,6 +46,63 @@ Every service = FastAPI app + its own PostgreSQL database + Alembic + `/health`
 (liveness) and `/ready` (dependency check). Shared cross-cutting code lives in
 `libs/smarthire_common`.
 
+### 2.1 Detailed component diagram
+
+```mermaid
+flowchart LR
+  client["Client / Postman"]
+
+  subgraph EDGE["Edge"]
+    gw["API Gateway :8080<br/>routing · circuit breakers · rate limit"]
+    redis[("Redis<br/>rate-limit state")]
+  end
+
+  subgraph SVC["Services — each owns its DB, exposes /health + /ready"]
+    auth["auth :8001<br/>signs RS256 JWT"]
+    cand["candidates :8002"]
+    jobs["jobs :8003"]
+    worker["jobs-worker<br/>Temporal activities"]
+    app["applications :8004<br/>apply + read-models"]
+  end
+
+  authdb[("auth-db")]
+  canddb[("candidates-db")]
+  jobsdb[("jobs-db")]
+  appdb[("applications-db<br/>+ job_refs / candidate_refs")]
+
+  subgraph BUS["Async backbone"]
+    kafka{{"Kafka topics<br/>candidate-events · job-events · application-events"}}
+    temporal["Temporal<br/>JobPublishingWorkflow"]
+  end
+
+  client -->|HTTPS /api/v1/*| gw
+  gw <--> redis
+  gw -->|proxy + per-upstream breaker| auth
+  gw -->|proxy + per-upstream breaker| cand
+  gw -->|proxy + per-upstream breaker| jobs
+  gw -->|proxy + per-upstream breaker| app
+
+  auth --- authdb
+  cand --- canddb
+  jobs --- jobsdb
+  worker --- jobsdb
+  app --- appdb
+
+  cand -->|candidate.*| kafka
+  jobs -->|job.*| kafka
+  app -->|application.*| kafka
+  kafka -->|job.* + candidate.*| app
+
+  jobs -->|start workflow| temporal
+  temporal --> worker
+  worker -->|job.upserted on ready/failed| kafka
+```
+
+Notes: all services **verify** JWTs locally with auth's public key — there is no
+runtime call to auth (stateless). Solid arrows to `Kafka`/`Temporal` are the
+async backbone; solid `---` lines are a service to its **own** database. No
+cross-service database links exist.
+
 ## 3. Services & data ownership
 
 | Service | Port | Owns (DB) | Responsibilities | Publishes | Consumes |
@@ -183,3 +240,65 @@ shared venv; only `smarthire_common` is installed as an importable package.
 
 New Week 3–5 capabilities land as **new services** consuming existing events —
 without modifying the current ones, which is the payoff of the event-driven split.
+
+## 13. Sequence diagrams
+
+### 13.1 Job publishing (async, via Temporal)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant R as Recruiter
+  participant G as Gateway
+  participant J as jobs
+  participant T as Temporal
+  participant W as jobs-worker
+  participant K as Kafka
+  R->>G: POST /api/v1/jobs/{id}/publish
+  G->>J: proxy (recruiter role)
+  J->>J: status = processing (committed)
+  J->>T: start JobPublishingWorkflow(job_id)
+  J-->>G: 202 Accepted (processing)
+  G-->>R: 202 Accepted
+  T->>W: breakdown_job
+  T->>W: extract_job_skills_keywords
+  T->>W: mark_job_ready
+  W->>J: (writes jobs-db) status = ready
+  W->>K: publish job.upserted(ready)
+  Note over T,W: any step fails → retried; exhausted → mark_job_failed (never a half-written "ready")
+```
+
+### 13.2 Apply — resilient while the jobs service is DOWN
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Candidate
+  participant G as Gateway
+  participant A as applications
+  participant DB as applications-db (read-models)
+  Note over G: jobs service is DOWN
+  C->>G: POST /api/v1/applications {job_id, candidate_id}
+  G->>A: proxy (candidate role)
+  A->>DB: eligibility via local job_refs + candidate_refs
+  DB-->>A: job READY, candidate exists
+  A->>A: duplicate / limit checks
+  A-->>G: 201 applied
+  G-->>C: 201 applied
+  Note over C,DB: no call to the jobs service — read-models (fed earlier by Kafka) make apply independent
+```
+
+### 13.3 Gateway fault isolation (a downstream is down)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as Client
+  participant G as Gateway
+  participant X as jobs (down)
+  U->>G: GET /api/v1/jobs
+  G->>X: forward (via jobs breaker)
+  X--xG: connection refused
+  G-->>U: 503 (fast) — breaker records failure
+  Note over G: after N failures the breaker OPENS → subsequent /jobs calls 503 immediately;<br/>/health and other services' routes stay 200
+```

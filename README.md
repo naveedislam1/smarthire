@@ -26,6 +26,24 @@ Deep dives: [docs/microservices.md](docs/microservices.md) ·
 Shared code (config, async DB, RS256 security, Kafka events, errors) lives in
 `libs/smarthire_common`.
 
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+  client["Client"] -->|/api/v1/*| gw["API Gateway :8080<br/>breakers · rate limit"]
+  gw --> auth["auth :8001"] --- authdb[("auth-db")]
+  gw --> cand["candidates :8002"] --- canddb[("candidates-db")]
+  gw --> jobs["jobs :8003"] --- jobsdb[("jobs-db")]
+  gw --> app["applications :8004"] --- appdb[("applications-db<br/>+ read-models")]
+  cand -->|candidate.*| kafka{{"Kafka"}}
+  jobs -->|job.*| kafka
+  app -->|application.*| kafka
+  kafka -->|job.* + candidate.*| app
+  jobs -->|publish workflow| temporal["Temporal"] --> worker["jobs-worker"] --- jobsdb
+```
+
+Full component + sequence diagrams: [docs/architecture.md](docs/architecture.md#21-detailed-component-diagram).
+
 ## How fault isolation works
 
 - **Database per service** — no shared DB failure domain.
